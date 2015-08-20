@@ -1,0 +1,10 @@
+2015-05-12
+UnoSDK V0.4.0
+1. added uno_wifi.
+2. added mag interface. And update uno imu
+
+
+2015-04-17
+UnoSDK V0.3.4
+exe echo xxx > /sys/class/gpio/export, before access to gpio.
+so non-sudo user can access gpio

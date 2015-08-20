@@ -1,0 +1,5 @@
+Failed to connect to non-global ctrl_ifname: (null)  error: No such file or directory
+ifdown: interface wlan0 not configured
+wlan0: ERROR while getting interface flags: No such device
+wlan0: ERROR while getting interface flags: No such device
+ERROR: 'wlan0' is not a WiFi interface

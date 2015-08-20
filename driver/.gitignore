@@ -1,0 +1,11 @@
+/IMU_API.o
+/uno_alarm.o
+/uno_imu.o
+/uno_led.o
+/uno_rs485.o
+/gpio_ctrl.o
+/uno_btn.o
+/uno_ctrl.o
+/uno_wifi.o
+/uno_utility.o
+/uno_info.o
