@@ -41,11 +41,13 @@ static float T_gyr_energy_sum_vibration = 3;
 //与移动相关的能量阈值
 static float T_gyr_energy_sum_acc = 0.25;
 
-
+//保存的回调函数地址
 static MOTION_STATE_CB cb;
 static pthread_t motion_thread;
-
-
+//步长
+static int stepLen;
+//采样频率
+static int samplingRate;
 
 //设置算法参数阈值
 void moiton_parameters_set(float parameters[]){
@@ -288,10 +290,10 @@ int classifyVibration(float energy_acc[], float energy_gyr[], int N){
 
 
 /*识别一段时间片（长度为interval）是属于哪个状态
- *input: arr_accX, arr_accY, arr_accZ, arr_gyrX, arr_gyrY, arr_gyrZ, energy_acc, energy_gyr
+ *input:  arr_gyrX, arr_gyrY, arr_gyrZ, energy_acc, energy_gyr
  *output: 0(静止)，1(振动)，2(移动)，3(旋转)
  */
-int recognizeState(float arr_accX[], float arr_accY[], float arr_accZ[], float arr_gyrX[], float arr_gyrY[], float arr_gyrZ[], float energy_acc[], float energy_gyr[], int interval){
+int recognizeState(float arr_gyrX[], float arr_gyrY[], float arr_gyrZ[], float energy_acc[], float energy_gyr[], int interval){
 	
 //	float T_acc_energy_slow = 0.02;
 //	float T_gyr_energy_slow = 0.01;
@@ -339,14 +341,58 @@ int recognizeState(float arr_accX[], float arr_accY[], float arr_accZ[], float a
 }
 
 
+
+/*降采样
+ * input: x_orig
+ * output: x
+*/
+void downSampling(float x[], int N, float x_orig[], int N_orig){
+	int t = N_orig/N;
+	if (t < 1){
+		printf("downSampling error\n\n");
+		return;
+	}
+	for (int i = 0, j = 0; i < N; i++,j+=t){
+		x[i] = x_orig[j];
+	}
+
+}
+
+
+/*用于静止情况下消去bias
+ *
+ */
+void correctBias_still(float accX[], float accY[], float accZ[], float gyrX[], float gyrY[], float gyrZ[], int fragLen){
+	float t_bias = arr_avg(accX, fragLen);
+	arr_sub(accX, t_bias, fragLen);
+
+	t_bias = arr_avg(accY, fragLen);
+	arr_sub(accY, t_bias, fragLen);
+
+	t_bias = arr_avg(accZ, fragLen);
+	arr_sub(accZ, t_bias, fragLen);
+
+
+	t_bias = arr_avg(gyrX, fragLen);
+	arr_sub(gyrX, t_bias, fragLen);
+
+	t_bias = arr_avg(gyrY, fragLen);
+	arr_sub(gyrY, t_bias, fragLen);
+
+	t_bias = arr_avg(gyrZ, fragLen);
+	arr_sub(gyrZ, t_bias, fragLen);
+}
+
+
+
 /*调用unoSDK，进行实时识别
  * 提供一个运动状态和相应的能量大小给回调函数
  *input: para, 该参数是滑动窗口的步长，跟识别速度有关
  *
  */
-void recognizeMotion(void* para){
-
-	int stepLen = *(int*)para;
+void recognizeMotion(){
+	
+	//int stepLen = *(int*)para;
 
 	int ret;
 	ret = uno_ctrl_init(NULL, NULL);
@@ -362,14 +408,16 @@ void recognizeMotion(void* para){
 	UNO_IMU_DATA_T data_acc;
 	UNO_IMU_DATA_T data_gyr;
 
-	const int frag_len = 30;
-	float frag_accX_orig[frag_len];
-	float frag_accY_orig[frag_len];
-	float frag_accZ_orig[frag_len];
+	//1s 采样点数量
+	int frag_len_orig = samplingRate;
+	float* frag_accX_orig = (float*) malloc(sizeof(float)*frag_len_orig);
+	float* frag_accY_orig = (float*) malloc(sizeof(float)*frag_len_orig);
+	float* frag_accZ_orig = (float*) malloc(sizeof(float)*frag_len_orig);
+	float* frag_gyrX_orig = (float*) malloc(sizeof(float)*frag_len_orig);
+	float* frag_gyrY_orig = (float*) malloc(sizeof(float)*frag_len_orig);
+	float* frag_gyrZ_orig = (float*) malloc(sizeof(float)*frag_len_orig);
 
-	float frag_gyrX_orig[frag_len];
-	float frag_gyrY_orig[frag_len];
-	float frag_gyrZ_orig[frag_len];
+	const int frag_len = 30;
 
 	// copy on orig sig
 	float frag_accX[frag_len];
@@ -383,19 +431,20 @@ void recognizeMotion(void* para){
 	float energy_acc[frag_len];
 	float energy_gyr[frag_len];
 
+	
 	// 跳过最初的一些点
-	int M = frag_len;
+	int M = frag_len_orig;
 	while(M--){
 		uno_imu_get_acc(&(data_acc.x), &(data_acc.y), &(data_acc.z));
 		uno_imu_get_gyr(&(data_gyr.x), &(data_gyr.y), &(data_gyr.z));
 	}
-
-
+	
+	
 	// 自适应动静阈值的设置
 	M = 5;
 	float energy_gyr_for_init = 0;
 	while(M--){
-		for (int i = 0; i < frag_len; i++){
+		for (int i = 0; i < frag_len_orig; i++){
 			uno_imu_get_gyr(&(data_gyr.x), &(data_gyr.y), &(data_gyr.z));
 			uno_imu_get_acc(&(data_acc.x), &(data_acc.y), &(data_acc.z));
 
@@ -407,7 +456,12 @@ void recognizeMotion(void* para){
 			frag_accY_orig[i] = data_acc.y;
 			frag_accZ_orig[i] = data_acc.z;
 		}
-		getEnergy(frag_gyrX_orig, frag_gyrY_orig, frag_gyrZ_orig, energy_gyr, frag_len);
+		downSampling(frag_gyrX, frag_len, frag_gyrX_orig, frag_len_orig);
+		downSampling(frag_gyrY, frag_len, frag_gyrY_orig, frag_len_orig);
+		downSampling(frag_gyrZ, frag_len, frag_gyrZ_orig, frag_len_orig);
+
+
+		getEnergy(frag_gyrX, frag_gyrY, frag_gyrZ, energy_gyr, frag_len);
 		//printf("%f", arr_max(energy_gyr, frag_len));
 
 		float t = arr_max(energy_gyr, frag_len);
@@ -416,15 +470,79 @@ void recognizeMotion(void* para){
 		if (t > energy_gyr_for_init)
 			energy_gyr_for_init = t;
 
-		printf("init:%f\n", energy_gyr_for_init);
+		printf("Init:%f\n", energy_gyr_for_init);
 	}
 	float T_energy_gyr_init = energy_gyr_for_init*2;
 	printf("Init gyr energy threshold: %f\n\n", T_energy_gyr_init);
+	
+	
 
+	//将原始信号的能量scale到一个标准水平
+	M = 5;
+	float acc_energy_avg = 0;
+	float gyr_energy_avg = 0;
+	for (int k = 0; k < M; k++){
+
+		for (int i = 0; i < frag_len_orig; i++){
+			uno_imu_get_acc(&(data_acc.x), &(data_acc.y), &(data_acc.z));
+			uno_imu_get_gyr(&(data_gyr.x), &(data_gyr.y), &(data_gyr.z));
+
+			frag_accX_orig[i] = data_acc.x;
+			frag_accY_orig[i] = data_acc.y;
+			frag_accZ_orig[i] = data_acc.z;
+
+			frag_gyrX_orig[i] = data_gyr.x;
+			frag_gyrY_orig[i] = data_gyr.y;
+			frag_gyrZ_orig[i] = data_gyr.z;
+
+
+		}
+
+		downSampling(frag_accX, frag_len, frag_accX_orig, frag_len_orig);
+		downSampling(frag_accY, frag_len, frag_accY_orig, frag_len_orig);
+		downSampling(frag_accZ, frag_len, frag_accZ_orig, frag_len_orig);
+
+		downSampling(frag_gyrX, frag_len, frag_gyrX_orig, frag_len_orig);
+		downSampling(frag_gyrY, frag_len, frag_gyrY_orig, frag_len_orig);
+		downSampling(frag_gyrZ, frag_len, frag_gyrZ_orig, frag_len_orig);
+
+		getEnergy(frag_gyrX, frag_gyrY, frag_gyrZ, energy_gyr, frag_len);
+		getEnergy(frag_accX, frag_accY, frag_accZ, energy_acc, frag_len);
+
+
+		correctBias_still(frag_accX, frag_accY, frag_accZ, frag_gyrX, frag_gyrY, frag_gyrZ, frag_len);
+
+		getEnergy(frag_accX, frag_accY, frag_accZ, energy_acc, frag_len);
+		getEnergy(frag_gyrX, frag_gyrY, frag_gyrZ, energy_gyr, frag_len);
+		
+		acc_energy_avg += arr_sum(energy_acc, frag_len);
+		gyr_energy_avg += arr_sum(energy_gyr, frag_len);
+		
+
+		printf("Init Energy level...\n");
+	}
+	
+	
+	
+	acc_energy_avg /= (M*frag_len);
+	gyr_energy_avg /= (M*frag_len);
+
+	float acc_ratio = 0.006/acc_energy_avg;
+	float gyr_ratio = 0.0027/gyr_energy_avg;
+
+
+	printf("acc_ratio: %f gyr_ratio: %f\n\n\n", acc_ratio, gyr_ratio);
+
+
+	//窗口的移动步长要小于窗口大小
+	if (stepLen > frag_len_orig)
+		stepLen = frag_len_orig;
+
+
+	//设置死循环，一直在识别运动状态
 	while(1){
-		//printf("step length: %d\n\n", stepLen);
 		//数组向左移位
-		int t_ind = frag_len - stepLen;
+		int t_ind = frag_len_orig - stepLen;
 		for (int i = 0; i < t_ind; i++){
 			int j = i + stepLen;
 			frag_accX_orig[i] = frag_accX_orig[j];
@@ -437,7 +555,7 @@ void recognizeMotion(void* para){
 
 		}
 		//采集新数据
-		for (int i = t_ind; i < frag_len; i++){
+		for (int i = t_ind; i < frag_len_orig; i++){
 			uno_imu_get_acc(&(data_acc.x), &(data_acc.y), &(data_acc.z));
 			uno_imu_get_gyr(&(data_gyr.x), &(data_gyr.y), &(data_gyr.z));
 
@@ -449,18 +567,17 @@ void recognizeMotion(void* para){
 			frag_gyrY_orig[i] = data_gyr.y;
 			frag_gyrZ_orig[i] = data_gyr.z;
 		}
-		//复制数据,因为frag_acc后续计算过程中数据会发生变化
-		//因此要保留frag_acc_orig
-		for (int i = 0; i < frag_len; i++) {
-			frag_accX[i] = frag_accX_orig[i];
-			frag_accY[i] = frag_accY_orig[i];
-			frag_accZ[i] = frag_accZ_orig[i];
+		
+		
+		
+		downSampling(frag_accX, frag_len, frag_accX_orig, frag_len_orig);
+		downSampling(frag_accY, frag_len, frag_accY_orig, frag_len_orig);
+		downSampling(frag_accZ, frag_len, frag_accZ_orig, frag_len_orig);
 
-			frag_gyrX[i] = frag_gyrX_orig[i];
-			frag_gyrY[i] = frag_gyrY_orig[i];
-			frag_gyrZ[i] = frag_gyrZ_orig[i];
-			
-		}
+		downSampling(frag_gyrX, frag_len, frag_gyrX_orig, frag_len_orig);
+		downSampling(frag_gyrY, frag_len, frag_gyrY_orig, frag_len_orig);
+		downSampling(frag_gyrZ, frag_len, frag_gyrZ_orig, frag_len_orig);
+
 
 
 		getEnergy(frag_gyrX, frag_gyrY, frag_gyrZ, energy_gyr, frag_len);
@@ -476,49 +593,74 @@ void recognizeMotion(void* para){
 		}
 		correctBias(frag_gyrX, frag_gyrY, frag_gyrZ, energy_acc, frag_len);
 
+
+		//Scale the signal
+		for (int i = 0; i < frag_len; i++){
+			energy_acc[i] *= acc_ratio;
+			frag_gyrX[i] *= gyr_ratio;
+			frag_gyrY[i] *= gyr_ratio;
+			frag_gyrZ[i] *= gyr_ratio;
+		}
+
+
 		getEnergy(frag_gyrX, frag_gyrY, frag_gyrZ, energy_gyr, frag_len);
 		
 		
 		
 		float gyr_energy_sum = arr_sum(energy_gyr, frag_len);
 		
-		int state = recognizeState(frag_accX, frag_accY, frag_accZ, frag_gyrX, frag_gyrY, frag_gyrZ, energy_acc, energy_gyr, frag_len);
+		int state = recognizeState(frag_gyrX, frag_gyrY, frag_gyrZ, energy_acc, energy_gyr, frag_len);
 
 		//当有事件发生时调用回调函数
-		if (cb && state > 0)
-			cb(state, gyr_energy_sum);
-
-
-		/*	
-		switch (state){
-		//	case 0: printf("Still, "); break;
-			case 1: printf("Vibrating, "); break;
-			case 2: printf("Moving, "); break;
-			case 3: printf("Rotating, "); break;
+		if (cb){
+			if (state > 0)
+				cb(state, gyr_energy_sum);
 		}
+		else{
+			switch (state){
+			//	case 0: printf("Still, "); break;
+				case 1: printf("Vibrating, "); break;
+				case 2: printf("Moving, "); break;
+				case 3: printf("Rotating, "); break;
+			}
 		printf("Energy sum: %f\n\n\n", gyr_energy_sum);
-		*/
+		}
 	}	
 	
 }
+
+
+//参数初始化
+void parasInit(float period, int Fs){
+	samplingRate = Fs;
+	stepLen = period*Fs;
+	float parameters[] = {10, 2.8, 0.02, 0.01, 1.5, 12, 3, 0.25};
+	moiton_parameters_set(parameters);
+}
+
 
 /*主函数入口，进行参数初始化
  *利用了双线程和回调函数，当通过传感器识别到了运动状态时，就调用一次回调函数
  *
  *
  */
-void motionRecogInit(MOTION_STATE_CB motion_cb, int stepLen){
-	cb = motion_cb;
-	//recognizeMotion((void*)&stepLen);
+void motionRecogInitCB(MOTION_STATE_CB motion_cb, float period, int Fs){
 	
-	float parameters[] = {10, 2.8, 0.02, 0.01, 1.5, 12, 3, 0.25};
-	moiton_parameters_set(parameters);
 
-	int ret = pthread_create(&motion_thread, NULL, recognizeMotion,(void*)&stepLen);
+	cb = motion_cb;
+	parasInit(period, Fs);	
+
+	int ret = pthread_create(&motion_thread, NULL, recognizeMotion, NULL);
 	if (ret != 0){
 		printf("create motion recognition thread error.\n\n");
 	}
 	else
 		printf("create motion recognition thread success.\n\n");
 	
+}
+
+//非回调形式
+void motionRecogInit(float period, int Fs){
+	parasInit(period, Fs);
+	recognizeMotion();
 }

@@ -137,10 +137,14 @@ void uno_motion_cb_func(int state, float energy){
 
 int main(int argc, char *argv[]){
 
-	int stepLen = 15;
-	//recognizeMotion();
-	motionRecogInit(uno_motion_cb_func, stepLen);
-
+	
+	
+	//0.3s for one step
+	float period = 0.6;
+	//sampling rate: 30Hz
+	int fs = 30;
+	//motionRecogInitCB(uno_motion_cb_func, period, fs);
+	motionRecogInit(period, fs);
 
 	while(1){
 		printf("main func running...\n\n");
